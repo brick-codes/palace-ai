@@ -97,6 +97,7 @@ struct LobbyDisplay {
     age: u64,
 }
 
+#[derive(Clone)]
 enum MutexStatus {
     Unmodified,
     InProgress,
@@ -130,32 +131,40 @@ impl Handler for Client {
         println!("connected");
 
 
-        let mut lobby_id_option = self.lobby_id_mutex.lock().unwrap();
-        match *lobby_id_option {
-            MutexStatus::Unmodified => {
-                let new_lobby = NewLobbyMessage {
-                max_players: 4,
-                password: String::from("eggs"),
-                lobby_name: String::from("brennan_test_lobby"),
-                player_name: String::from("bot_host")
-                };
-                let new_lobby_message = PalaceMessage::NewLobby(new_lobby);
-                let message_lobby = serde_json::to_vec(&new_lobby_message).unwrap();
-                println!("no lobby exists. Attempting to create a new one");
-                *lobby_id_option  = MutexStatus::InProgress;
-                self.out.send(message_lobby)
-            },
-            MutexStatus::InProgress => {
-                println!("oh shiiit");
-                Ok(())
-            },
-            MutexStatus::Finished(ref lobby_id_string) => {
-                self.lobby_id = Some(lobby_id_string.to_string());
-                // TODO: join lobby
-                Ok(())
+        loop {
+            let mut lobby_id_option = self.lobby_id_mutex.lock().unwrap();
+            let mutex_status = (*lobby_id_option).clone();
+            match mutex_status {
+                MutexStatus::Unmodified => {
+                    *lobby_id_option = MutexStatus::InProgress;
+                    let new_lobby = NewLobbyMessage {
+                        max_players: 4,
+                        password: String::from("eggs"),
+                        lobby_name: String::from("brennan_test_lobby"),
+                        player_name: String::from("bot_host")
+                    };
+                    let new_lobby_message = PalaceMessage::NewLobby(new_lobby);
+                    let message_lobby = serde_json::to_vec(&new_lobby_message).unwrap();
+                    println!("no lobby exists. Attempting to create a new one");
+                    self.out.send(message_lobby);
+                    break;
+                },
+                MutexStatus::InProgress => {
+                    println!("lobby is in the process of being created");
+                    continue;
+                },
+                MutexStatus::Finished(ref lobby_id_string) => {
+                    self.lobby_id = Some(lobby_id_string.to_string());
+                    // TODO: join lobby
+                    println!("got lobby id from mutex");
+                    let join_lobby_message = PalaceMessage::JoinLobby(JoinLobbyMessage{lobby_id : lobby_id_string.to_string(), player_name: String::from("brennan"), password: String::from("eggs")});
+                    let json_join_lobby_message = serde_json::to_vec(&join_lobby_message).unwrap();
+                    self.out.send(json_join_lobby_message);
+                    break;
+                }
             }
         }
-
+    Ok(())
 //        println!("resutl of send, {:?}",a);
 
     }
@@ -172,16 +181,15 @@ impl Handler for Client {
             PalaceOutMessage::NewLobbyResponse(received_message) => {
                 println!("setting lobby id");
                 let lobby_response = received_message.unwrap();
-                self.player_id = Some(lobby_response.player_id);
-                self.lobby_id = Some(lobby_response.lobby_id);
+                self.player_id = Some(lobby_response.player_id.clone());
+                self.lobby_id = Some(lobby_response.lobby_id.clone());
 
                 let mut lobby_id_option = self.lobby_id_mutex.lock().unwrap();
                 *lobby_id_option  = MutexStatus::Finished(self.lobby_id.clone().unwrap());
-
-
-//                let list_lobbies_message = PalaceMessage::ListLobbies;
-//                let message_list_lobby = serde_json::to_vec(&list_lobbies_message).unwrap();
-//                self.out.send(message_list_lobby); // sending list lobbies. We could remove this
+                println!("set status of creating lobby to finished");
+                let join_lobby_message = PalaceMessage::JoinLobby(JoinLobbyMessage{lobby_id : lobby_response.lobby_id.clone(), player_name: String::from("brennan"), password: String::from("eggs")});
+                let json_join_lobby_message = serde_json::to_vec(&join_lobby_message).unwrap();
+                self.out.send(json_join_lobby_message);
 
             }
             PalaceOutMessage::LobbyList(received_message) => {
@@ -189,7 +197,7 @@ impl Handler for Client {
                 println!("number of lobbies: {}", received_message.len());
             }
             PalaceOutMessage::JoinLobbyResponse(received_message) => {
-                println!("testing2");
+                println!("connected to lobby!!");
             }
             PalaceOutMessage::PublicGameState(receieved_message) => {
                 println!("testing3");
@@ -220,17 +228,30 @@ fn main() {
     println!("begin program");
     let lobby_id = Arc::new(Mutex::new(MutexStatus::Unmodified));
 
-    let lobby_id1 = lobby_id.clone();
-    let lobby_id2 = lobby_id.clone();
-    // Now, instead of a closure, the Factory returns a new instance of our Handler.
-    let handle = thread::spawn( move ||{
-        connect("ws://dev.brick.codes:3012", move |out| Client { out: out, player_id: None, player_index: None, lobby_id_mutex: lobby_id1.clone(), lobby_id: None, }).unwrap();
-    });
-    let handle2 = thread::spawn(move ||{
-        connect("ws://dev.brick.codes:3012", move |out| Client { out: out, player_id: None, player_index: None, lobby_id_mutex: lobby_id2.clone(), lobby_id: None }).unwrap();
-    });
-    handle.join().unwrap();
-    handle2.join().unwrap();
+    let mut join_handle_vec = Vec::new();
+    for x in 0..5 {
+        let lobby_id_clone = lobby_id.clone();
+        let handle = thread::spawn( move ||{
+            println!("creating thread: {}", x);
+            connect("ws://dev.brick.codes:3012", move |out| Client { out: out, player_id: None, player_index: None, lobby_id_mutex: lobby_id_clone.clone(), lobby_id: None, }).unwrap();
+        });
+        join_handle_vec.push(handle);
+    }
+    for handle in &mut join_handle_vec.into_iter() {
+        handle.join().unwrap();
+    }
+
+//    let lobby_id1 = lobby_id.clone();
+//    let lobby_id2 = lobby_id.clone();
+//    // Now, instead of a closure, the Factory returns a new instance of our Handler.
+//    let handle = thread::spawn( move ||{
+//        connect("ws://dev.brick.codes:3012", move |out| Client { out: out, player_id: None, player_index: None, lobby_id_mutex: lobby_id1.clone(), lobby_id: None, }).unwrap();
+//    });
+//    let handle2 = thread::spawn(move ||{
+//        connect("ws://dev.brick.codes:3012", move |out| Client { out: out, player_id: None, player_index: None, lobby_id_mutex: lobby_id2.clone(), lobby_id: None }).unwrap();
+//    });
+//    handle.join().unwrap();
+//    handle2.join().unwrap();
     println!("end program");
 }
 //fn main() {
