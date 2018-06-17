@@ -74,6 +74,7 @@ pub struct Card {
 pub enum GamePhase {
     Setup,
     Play,
+    Complete,
 }
 
 #[derive(Deserialize, Debug)]
@@ -206,7 +207,7 @@ enum MakePlayError {
 enum PalaceOutMessage {
     NewLobbyResponse(Result<NewLobbyResponse, NewLobbyError>),
     JoinLobbyResponse(Result<JoinLobbyResponse, JoinLobbyError>),
-    LobbyList(Box<[LobbyDisplay]>),
+    ListLobbiesResponse(Box<[LobbyDisplay]>),
     ChooseFaceupResponse(Result<HandResponse, ChooseFaceupError>),
     MakePlayResponse(Result<HandResponse,   MakePlayError>),
     ReconnectResponse(Result<(), ReconnectError>),
@@ -261,6 +262,8 @@ struct Client {
     num_players: u8,
     is_host: bool,
     hand: Option<Box<[Card]>>,
+    face_up_three: Option<Box<[Card]>>,
+    num_face_down: Option<u8>
 }
 
 // We implement the Handler trait for Client so that we can get more
@@ -321,7 +324,6 @@ impl Handler for Client {
     // and returns a `Result<()>`.
     fn on_message(&mut self, msg: Message) -> ws::Result<()> {
         // Close the connection when we get a response from the server
-        println!("Got message: {}", msg);
         let received_message = serde_json::from_slice::<PalaceOutMessage>(&msg.into_data()).unwrap();
         println!("message: {:?}", received_message);
         match received_message {
@@ -335,7 +337,7 @@ impl Handler for Client {
                 *lobby_id_option = MutexStatus::Finished(self.lobby_id.clone().unwrap());
                 println!("set status of creating lobby to finished");
             }
-            PalaceOutMessage::LobbyList(received_message) => {
+            PalaceOutMessage::ListLobbiesResponse(received_message) => {
                 // this doesn't really do anything
                 println!("number of lobbies: {}", received_message.len());
             }
@@ -346,12 +348,39 @@ impl Handler for Client {
 
             }
             PalaceOutMessage::PublicGameStateEvent(received_message) => {
-                println!("testing3");
 
+                self.face_up_three = Some(received_message.face_up_three[self.player_index.unwrap() as usize].clone());
+                self.num_face_down = Some(received_message.face_down_three[self.player_index.unwrap() as usize].clone());
                 if self.player_index.unwrap() == received_message.active_player {
                     println!("it's my turn");
-                    self.take_turn();
+                    match received_message.cur_phase {
+                        GamePhase::Setup => {
+                            println!("choosing face up three");
+                            let faceup_struct = ChooseFaceupMessage {
+                                card_one: self.face_up_three.clone().unwrap()[0],
+                                card_two: self.face_up_three.clone().unwrap()[1],
+                                card_three: self.face_up_three.clone().unwrap()[2],
+                                lobby_id: self.lobby_id.clone().unwrap(),
+                                player_id: self.player_id.clone().unwrap()
+                            };
+                            let faceup_message = PalaceMessage::ChooseFaceup(faceup_struct);
+                            let json_message = serde_json::to_vec(&faceup_message).unwrap();
+                            self.out.send(json_message);
+                        },
+                        GamePhase::Play => {
+                            println!("making a play");
+                            self.take_turn();
+                        },
+                        GamePhase::Complete => {
+                            println!("game is over")
+                        }
+                    }
                 }
+//                else {
+//                    println!("not my turn, player index is: {:?} and active player is: {:?}", self.player_index.unwrap(), received_message.active_player );
+//                }
+
+
             }
             PalaceOutMessage::ReconnectResponse(received_message) => {
                 let reconnect_response = received_message.expect("Failed to reconnect");
@@ -399,17 +428,58 @@ impl Handler for Client {
 impl Client {
     fn take_turn(&mut self) {
         println!("taking turn");
-//        let temp_hand = self.hand.unwrap().clone();
-        let random_card = rand::thread_rng().choose(self.hand.as_ref().unwrap()).unwrap();
-        let play_details = MakePlayMessage {
-            cards: vec![*random_card].into_boxed_slice(),
+        if (*self.hand.clone().unwrap()).len() <= 0 {
+            println!("hand is empty, attempt to play from face up");
+            if (*self.face_up_three.clone().unwrap()).len() <= 0 {
+                println!("face up three is empty, attempt to play from face down three");
+                if self.num_face_down.clone().unwrap() <= 0 {
+                    println!("WE WON! why is our turn happening????");
+                }
+                else {
+                    println!("sending empty slice as a facedown play");
+                    let play_details = MakePlayMessage {
+                        cards: vec![].into_boxed_slice(),
+                        lobby_id: self.lobby_id.clone().unwrap(),
+                        player_id: self.player_id.clone().unwrap(),
+                    };
+                    let play_message = PalaceMessage::MakePlay(play_details);
+                    let json_message = serde_json::to_vec( & play_message).unwrap();
+                    println ! ("sending play!");
+                    self.out.send(json_message);
+                }
+            }
+            else {
+                println!("playing from face up three");
+                let random_card = rand::thread_rng().choose( self.face_up_three.as_ref().unwrap()).unwrap();
+                println!("face up three is: {:?}", self.face_up_three);
+                println!("random card being played is: {:?}", random_card );
+
+                let play_details = MakePlayMessage {
+                    cards:  vec ! [ * random_card].into_boxed_slice(),
+                    lobby_id: self.lobby_id.clone().unwrap(),
+                    player_id: self.player_id.clone().unwrap(),
+                };
+                let play_message = PalaceMessage::MakePlay(play_details);
+                let json_message = serde_json::to_vec( & play_message).unwrap();
+                println ! ("sending play!");
+                self.out.send(json_message);
+            }
+        }
+        else {
+            let temp_hand = self.hand.clone().unwrap();
+            let random_card = rand::thread_rng().choose( self.hand.as_ref().unwrap()).unwrap();
+            println!("hand is: {:?}", self.hand);
+            println!("random card being played is: {:?}", random_card );
+            let play_details = MakePlayMessage {
+            cards: vec ! [ * random_card].into_boxed_slice(),
             lobby_id: self.lobby_id.clone().unwrap(),
             player_id: self.player_id.clone().unwrap(),
-        };
-        let play_message = PalaceMessage::MakePlay(play_details);
-        let json_message = serde_json::to_vec(&play_message).unwrap();
-        println!("sending play!");
-        self.out.send(json_message);
+            };
+            let play_message = PalaceMessage::MakePlay(play_details);
+            let json_message = serde_json::to_vec( & play_message).unwrap();
+            println ! ("sending play!");
+            self.out.send(json_message);
+        }
     }
 }
 
@@ -426,7 +496,7 @@ fn main() {
         let lobby_id_clone = lobby_id.clone();
         let handle = thread::spawn(move || {
             println!("creating thread: {}", i);
-            connect("ws://dev.brick.codes:3012", move |out| Client {
+            connect("ws://192.168.2.194:3012", move |out| Client {
                 out: out,
                 player_id: None,
                 player_index: None,
@@ -435,7 +505,9 @@ fn main() {
                 num_players: NUM_PLAYERS,
                 is_host: false,
                 hand: None,
-            }).unwrap();
+                face_up_three: None,
+                num_face_down: None,
+            }).expect(&format!("could not connect thread {} to server", i));
         });
         join_handle_vec.push(handle);
     }
@@ -454,7 +526,7 @@ fn main() {
 //    });
 //    handle.join().unwrap();
 //    handle2.join().unwrap();
-    println!("end program");
+        println!("end program");
 }
 //fn main() {
 //    connect("ws://dev.brick.codes:3012", |out| {
@@ -462,7 +534,7 @@ fn main() {
 //        let list_lobbies = PalaceMessage::ListLobbies;
 //
 //        let message = serde_json::to_vec(&list_lobbies).unwrap();
-//
+//a
 //        out.send(message).unwrap();
 //        println!("here!");
 //        move |msg: ws::Message| {
